@@ -4,22 +4,33 @@ from skimage.metrics import structural_similarity as ssim
 
 
 def alpha_blend_stitch(background_1080p, roi_1080p, saliency_map, bbox):
-    """Stitch the EDSR-upscaled foreground ROI onto the 1080p background using smooth Gaussian feathering.
+    """Stitch the EDSR-upscaled foreground ROI onto the full 1080p background canvas using smooth Gaussian feathering.
     
     Eliminates visible rectangular seams by applying a Gaussian-weighted alpha blend
     around the ROI edges where it merges into the bicubic background canvas. The
     saliency map provides the feathering gradient. No hard-coded boundary lines are drawn.
     
-    Key flow:
-    1. Place the upscaled ROI onto a blank canvas at the correct position
-    2. Build a full-frame feather mask derived from the saliency map
-    3. Alpha-blend the canvas using the feather mask for seamless transitions
+    The surrounding background (trees, leaves, branches) remains fully intact
+    across the entire 1080p frame.
+    
+    Key operations:
+    1. Build full 1080p base canvas from background (all background, no ROI)
+    2. Place EDR-upscaled foreground ROI at 3x-scaled position from 360p bbox
+    3. Build Gaussian feather mask from saliency map (3-channel)
+    4. Blend ROI with original background using feather mask for seamless transitions
     """
     x, y, w, h = bbox
 
-    # --- Step 1: Place ROI on canvas ---
-    canvas_1080p = np.zeros((1080, 1920, 3), dtype=np.float32)
+    # --- Step 1: Build full 1080p base canvas from background ---
+    # Ensure background_1080p is 1920x1080
+    if background_1080p.shape != (1080, 1920, 3):
+        canvas_1080p = cv2.resize(background_1080p, (1920, 1080), interpolation=cv2.INTER_CUBIC).astype(np.float32)
+    else:
+        canvas_1080p = background_1080p.astype(np.float32)
+    # --- End Step 1 ---
 
+    # --- Step 2: Place EDR-upscaled foreground ROI at 3x-scaled position ---
+    # Scale bbox coordinates from 360p to 1080p (factor of 3)
     target_x, target_y = x * 3, y * 3
 
     patch_h, patch_w = roi_1080p.shape[:2]
@@ -30,14 +41,18 @@ def alpha_blend_stitch(background_1080p, roi_1080p, saliency_map, bbox):
     actual_w = end_x - target_x
     actual_h = end_y - target_y
 
+    # Save the original background patch that will be overwritten
+    orig_patch = canvas_1080p[target_y:end_y, target_x:end_x].copy()
+
     if actual_w > 0 and actual_h > 0:
-        # Resize ROI to exactly fit the target area (already 3x-upsampled from 360p)
+        # Resize ROI to exactly fit the target area
         if roi_1080p.shape[:2] != (actual_h, actual_w):
             roi_1080p = cv2.resize(roi_1080p, (actual_w, actual_h), interpolation=cv2.INTER_LINEAR)
-        canvas_1080p[target_y:end_y, target_x:end_x] = roi_1080p
-    # --- End Step 1 ---
+        # Place the ROI on the canvas
+        canvas_1080p[target_y:end_y, target_x:end_x] = roi_1080p.astype(np.float32)
+    # --- End Step 2 ---
 
-    # --- Step 2: Build feather mask from saliency map ---
+    # --- Step 3: Build Gaussian feather mask from saliency map (3-channel) ---
     # Resize saliency map to match the ROI region dimensions
     roi_region_height = end_y - target_y
     roi_region_width = end_x - target_x
@@ -46,26 +61,30 @@ def alpha_blend_stitch(background_1080p, roi_1080p, saliency_map, bbox):
     saliency_norm = saliency_roi / 255.0 if saliency_roi.max() > 1 else saliency_roi
     # Apply Gaussian blur to create smooth feather gradient at edges
     feather_sigma = max(1, min(roi_region_width, roi_region_height) // 10)
-    feather_mask = cv2.GaussianBlur(saliency_norm, (0, 0), feather_sigma)
+    feather_mask_2d = cv2.GaussianBlur(saliency_norm, (0, 0), feather_sigma)
     # Clip to [0, 1] range
-    feather_mask = np.clip(feather_mask, 0, 1)
-    # --- End Step 2 ---
-
-    # --- Step 3: Apply full-frame feather mask ---
-    # Start with ones (no feathering = full ROI), then mask the edges
-    full_feather = np.ones((1080, 1920), dtype=np.float32)
-    # Apply the feathered mask only over the ROI region on the canvas
-    full_feather[target_y:end_y, target_x:end_x] = feather_mask
-    # Expand to 3 channels for broadcasting
-    alpha_3d = np.repeat(full_feather[:, :, np.newaxis], 3, axis=2)
+    feather_mask_2d = np.clip(feather_mask_2d, 0, 1)
+    # Expand to 3 channels for blending
+    feather_mask_3ch = np.repeat(feather_mask_2d[:, :, np.newaxis], 3, axis=2)
     # --- End Step 3 ---
 
-    # --- Step 4: Alpha blend using the feather mask ---
-    # canvas_1080p is float, background is uint8 -> convert background to float
-    background_float = background_1080p.astype(np.float32)
-    # Feathered blend: where feather_mask=1.0 → full ROI, where 0.0 → pure background
-    final_output = (alpha_3d * canvas_1080p) + ((1.0 - alpha_3d) * background_float)
-    return final_output.astype(np.uint8)
+    # --- Step 4: Alpha blend ROI with original background using feather mask ---
+    # Create the output canvas (copy of canvas with ROI placed)
+    output = canvas_1080p.copy()
+    
+    # Blend the ROI with the original background patch using the feather mask
+    # The feather_mask_3ch tapers from 1.0 at center to 0.0 at edges
+    # Blend formula: blended = feather_mask_3ch * roi_1080p_astype(float) + (1 - feather_mask_3ch) * orig_patch_astype(float)
+    blended_region = feather_mask_3ch * roi_1080p.astype(np.float32) + (1.0 - feather_mask_3ch) * orig_patch.astype(np.float32)
+    
+    # Place the blended region back onto the output canvas
+    output[target_y:end_y, target_x:end_x] = blended_region
+    
+    # Outside the ROI region, the output is pure original background (already in canvas)
+    # No additional processing needed
+    # --- End Step 4 ---
+
+    return output.astype(np.uint8)
 
 
 def calculate_metrics(frame_gt, final_output, bbox):

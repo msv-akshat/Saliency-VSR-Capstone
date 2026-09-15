@@ -16,28 +16,24 @@ def run_pipeline():
     frame_path_360 = os.path.join(degraded_dir, "frame_0000.png")
     frame_path_gt = os.path.join(gt_dir, "frame_0000.png")
     
-    frame_360 = cv2.imread(frame_path_360)
+    frame_360 = cv2.imread(frame_path_360)  # Severely degraded frame for VSR
     frame_gt = cv2.imread(frame_path_gt)
     
-    # === Saliency Extraction (Zero-Fallback Policy) ===
-    # If the model cannot detect a foreground subject, a ValueError is raised
-    # instead of defaulting to a hardcoded rectangular mock box.
+    # === Dual-Stream Saliency Extraction ===
+    # Create a lightly-filtered/interim copy of the frame for YOLO mask detection.
+    # This prevents YOLOv8 from failing on extreme JPEG/compression artifacts,
+    # while the original severely-degraded frame feeds the actual VSR routing pipeline.
+    # Light Gaussian blur (σ=5.0) restores some high-frequency info for detection
+    # without compromising the VSR degradation intent.
+    frame_interim = cv2.GaussianBlur(frame_360, (0, 0), 5.0)
+    # Optional: slight bicubic resize then back could also help, but simple blur suffices
+    
     try:
-        binary_mask, saliency_map = generate_saliency_map(frame_360)
+        binary_mask, saliency_map = generate_saliency_map(frame_360, frame_interim_bgr=frame_interim)
     except ValueError as e:
         print(f"[ERROR] Saliency extraction failed: {e}")
         print("Cannot proceed with Hard Spatial Routing without a detected foreground subject.")
         return
-    # ==================================================
-    
-    # === Standalone Saliency Heatmap Export ===
-    # Only generate heatmap if saliency extraction succeeded
-    saliency_8bit = (saliency_map * 255).astype(np.uint8)
-    saliency_heatmap = cv2.applyColorMap(saliency_8bit, cv2.COLORMAP_JET)
-    output_results_dir = os.path.join(output_dir, "1080p_Output")
-    os.makedirs(output_results_dir, exist_ok=True)
-    saliency_path = os.path.join(output_results_dir, "saliency_heatmap.jpg")
-    cv2.imwrite(saliency_path, saliency_heatmap)
     # =========================================
     
     x, y, w, h = compute_bounding_box(binary_mask)
@@ -54,12 +50,11 @@ def run_pipeline():
     
     comparison_grid, ssim_score, _ = generate_comparison_grid(frame_360, frame_gt, final_output, psnr, compute_saved)
     
-    comparison_path = os.path.join(output_results_dir, "comparison_metrics_grid.jpg")
+    comparison_path = os.path.join(output_dir, "1080p_Output", "comparison_metrics_grid.jpg")
     cv2.imwrite(comparison_path, comparison_grid)
     
     print(f"\n[SUCCESS] Grid Saved: {comparison_path}")
     print(f"Metrics -> PSNR: {psnr:.2f} dB | SSIM: {ssim_score:.4f} | Compute Saved: {compute_saved:.1f}%")
-    print(f"[SUCCESS] Saliency heatmap saved: {saliency_path}")
 
 if __name__ == "__main__":
     run_pipeline()

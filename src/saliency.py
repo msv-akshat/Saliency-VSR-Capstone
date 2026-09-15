@@ -3,18 +3,22 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-def generate_saliency_map(frame_360p_bgr):
+def generate_saliency_map(frame_360p_bgr, frame_interim_bgr=None):
     """Extract foreground saliency mask using YOLOv8-Segmentation model.
     
-    Production-grade subject localization for Hard Spatial Routing VSR pipeline.
+    Dual-Stream Approach:
+    - An interim, lightly-filtered or bicubic-interpolated copy of the frame is passed to YOLO
+      for robust mask detection (prevents model failure on extreme compression).
+    - The severely degraded frame is fed into the actual VSR routing pipeline.
     
     Key operations:
-    1. Loads YOLOv8n-seg model from models/yolov8n-seg.pt
-    2. Runs inference on 360p frame, filtering for bird class (COCO class == 14)
-    3. Extracts instance segmentation mask for the detected bird
-    4. Resizes mask to native 360p resolution (640x360) using bilinear interpolation
-    5. Normalizes mask to [0.0, 1.0] float saliency map
-    6. Zero-Fallback Policy: raises ValueError if no bird detected (no fake boxes)
+    1. If interim frame provided, use it for YOLO mask detection (robust to compression artifacts)
+    2. The original degraded frame is used for VSR processing
+    3. Runs inference on bird class (COCO class == 14)
+    4. Extracts instance segmentation mask for the detected bird
+    5. Resizes mask to native 360p resolution (640x360) using bilinear interpolation
+    6. Normalizes mask to [0.0, 1.0] float saliency map
+    7. Zero-Fallback Policy: raises ValueError if no bird detected (no fake boxes)
     
     Returns:
         binary_mask: np.uint8 array of shape (360, 640) with 0/1 values
@@ -28,9 +32,12 @@ def generate_saliency_map(frame_360p_bgr):
     # Load the YOLOv8-Seg model
     model = YOLO(model_path)
     
-    # Run inference on the 360p frame
+    # Dual-stream: use interim frame for YOLO detection if provided, otherwise use the main frame
+    frame_for_detection = frame_interim_bgr if frame_interim_bgr is not None else frame_360p_bgr
+    
+    # Run inference on the detection frame
     # verbose=False suppresses the training-style output
-    results = model(frame_360p_bgr, verbose=False)
+    results = model(frame_for_detection, verbose=False)
     
     # Filter detections for bird class (COCO class 14)
     bird_masks = []
@@ -46,14 +53,14 @@ def generate_saliency_map(frame_360p_bgr):
                 # Extract segmentation mask for each bird detection
                 for idx in bird_indices:
                     # Get the mask for this detection
-                    mask = result.masks.data[idx].cpu().numpy()  # Shape: (H, W) - already at frame resolution
+                    mask = result.masks.data[idx].cpu().numpy()  # Shape: (H, W) - at detection frame resolution
                     bird_masks.append(mask)
     
     # Zero-Fallback Policy: if no bird detected, raise explicit ValueError
     if not bird_masks:
         raise ValueError("YOLOv8-Segmentation detected no bird in the frame. "
                          "Cannot compute saliency mask without a detected foreground subject. "
-                         "Check if the bird is visible in the degraded frame.")
+                         "Check if the bird is visible in the frame.")
     
     # Combine all bird masks (take the union / largest mask)
     # Stack masks and take the maximum (union of all bird detections)
