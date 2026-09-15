@@ -4,11 +4,12 @@ from skimage.metrics import structural_similarity as ssim
 
 
 def alpha_blend_stitch(background_1080p, roi_1080p, saliency_map, bbox):
-    """Stitch the EDSR-upscaled foreground ROI onto the full 1080p background canvas using smooth Gaussian feathering.
+    """Stitch the EDR-upscaled foreground ROI onto the full 1080p background canvas using smooth Gaussian feathering.
     
     Eliminates visible rectangular seams by applying a Gaussian-weighted alpha blend
     around the ROI edges where it merges into the bicubic background canvas. The
-    saliency map provides the feathering gradient. No hard-coded boundary lines are drawn.
+    saliency map provides the bird location, but the feather mask covers the entire
+    ROI region for seamless blending.
     
     The surrounding background (trees, leaves, branches) remains fully intact
     across the entire 1080p frame.
@@ -16,7 +17,7 @@ def alpha_blend_stitch(background_1080p, roi_1080p, saliency_map, bbox):
     Key operations:
     1. Build full 1080p base canvas from background (all background, no ROI)
     2. Place EDR-upscaled foreground ROI at 3x-scaled position from 360p bbox
-    3. Build Gaussian feather mask from saliency map (3-channel)
+    3. Build Gaussian feather mask covering the entire ROI region with central enhancement
     4. Blend ROI with original background using feather mask for seamless transitions
     """
     x, y, w, h = bbox
@@ -52,19 +53,34 @@ def alpha_blend_stitch(background_1080p, roi_1080p, saliency_map, bbox):
         canvas_1080p[target_y:end_y, target_x:end_x] = roi_1080p.astype(np.float32)
     # --- End Step 2 ---
 
-    # --- Step 3: Build Gaussian feather mask from saliency map (3-channel) ---
-    # Resize saliency map to match the ROI region dimensions
+    # --- Step 3: Build Gaussian feather mask covering the ROI region ---
+    # Create a feather mask that transitions from 1.0 (full ROI enhancement) at center
+    # to 0.0 (original background) at the edges of the ROI region.
+    # This ensures the bird is enhanced while the surrounding area blends naturally.
     roi_region_height = end_y - target_y
     roi_region_width = end_x - target_x
-    saliency_roi = cv2.resize(saliency_map, (roi_region_width, roi_region_height), interpolation=cv2.INTER_LINEAR)
-    # Normalize to [0, 1]
-    saliency_norm = saliency_roi / 255.0 if saliency_roi.max() > 1 else saliency_roi
-    # Apply Gaussian blur to create smooth feather gradient at edges
-    feather_sigma = max(1, min(roi_region_width, roi_region_height) // 10)
-    feather_mask_2d = cv2.GaussianBlur(saliency_norm, (0, 0), feather_sigma)
-    # Clip to [0, 1] range
+    
+    # Create a feather mask that starts at 1.0 in center and fades to 0.0 at edges
+    # Use a circular mask that covers most of the ROI region
+    mask_canvas = np.zeros((roi_region_height, roi_region_width), dtype=np.float32)
+    
+    # Create an ellipse that covers most of the ROI
+    center_y, center_x = roi_region_height // 2, roi_region_width // 2
+    # Axes: cover 80% of width and height
+    axes_x = roi_region_width * 0.8 / 2
+    axes_y = roi_region_height * 0.8 / 2
+    
+    Y, X = np.ogrid[-center_y:roi_region_height-center_y, -center_x:roi_region_width-center_x]
+    ellipse_mask = (X/axes_x)**2 + (Y/axes_y)**2 <= 1
+    mask_canvas[ellipse_mask] = 1.0
+    
+    # Apply Gaussian blur to create smooth feather transition
+    # Sigma covers a significant portion of the ROI for smooth blending
+    feather_sigma = max(1, min(roi_region_width, roi_region_height) // 6)
+    feather_mask_2d = cv2.GaussianBlur(mask_canvas, (0, 0), feather_sigma)
     feather_mask_2d = np.clip(feather_mask_2d, 0, 1)
-    # Expand to 3 channels for blending
+    
+    # Expand to 3 channels
     feather_mask_3ch = np.repeat(feather_mask_2d[:, :, np.newaxis], 3, axis=2)
     # --- End Step 3 ---
 
@@ -73,7 +89,7 @@ def alpha_blend_stitch(background_1080p, roi_1080p, saliency_map, bbox):
     output = canvas_1080p.copy()
     
     # Blend the ROI with the original background patch using the feather mask
-    # The feather_mask_3ch tapers from 1.0 at center to 0.0 at edges
+    # The feather mask tapers from 1.0 at center to 0.0 at edges
     # Blend formula: blended = feather_mask_3ch * roi_1080p_astype(float) + (1 - feather_mask_3ch) * orig_patch_astype(float)
     blended_region = feather_mask_3ch * roi_1080p.astype(np.float32) + (1.0 - feather_mask_3ch) * orig_patch.astype(np.float32)
     

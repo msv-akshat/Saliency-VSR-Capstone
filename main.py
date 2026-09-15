@@ -40,7 +40,7 @@ def run_pipeline():
     roi_360 = frame_360[y:y+h, x:x+w]
     
     model_path = os.path.join(os.path.dirname(__file__), "models", "EDSR_x3.pb")
-    roi_1080 = upscale_foreground(roi_360, model_path=model_path)
+    roi_1080 = upscale_foreground(roi_360)
     bg_1080 = resize_background(frame_360, target_shape=(1920, 1080))
     
     final_output = alpha_blend_stitch(bg_1080, roi_1080, saliency_map, (x, y, w, h))
