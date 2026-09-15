@@ -1,37 +1,54 @@
 import cv2
 import numpy as np
-from skimage.metrics import structural_similarity as ssim
+from skimage.metrics import structural_similarity as sssim
 
 
 def alpha_blend_stitch(background_1080p, roi_1080p, saliency_map, bbox):
-    """Stitch the EDR-upscaled foreground ROI onto the full 1080p background canvas using smooth Gaussian feathering.
-    
-    Eliminates visible rectangular seams by applying a Gaussian-weighted alpha blend
-    around the ROI edges where it merges into the bicubic background canvas. The
-    saliency map provides the bird location, but the feather mask covers the entire
-    ROI region for seamless blending.
-    
-    The surrounding background (trees, leaves, branches) remains fully intact
-    across the entire 1080p frame.
-    
+    """Stitch the EDR/Real-ESRGAN-enhanced foreground ROI onto the full 1080p background canvas
+    using the true YOLO segmentation mask for alpha blending.
+
     Key operations:
     1. Build full 1080p base canvas from background (all background, no ROI)
-    2. Place EDR-upscaled foreground ROI at 3x-scaled position from 360p bbox
-    3. Build Gaussian feather mask covering the entire ROI region with central enhancement
-    4. Blend ROI with original background using feather mask for seamless transitions
+    2. Place EDR/Real-ESRGAN-enhanced foreground ROI at 3x-scaled position from 360p bbox
+    3. Extract the true saliency mask region, scale by 3x via cv2.INTER_LINEAR,
+       Gaussian-feedter with ksize=(7,7), and blend the enhanced ROI smoothly over
+       the background canvas using the actual foreground shape from YOLO segmentation –
+       eliminating rectangular seams and edge artifacts.
+    4. The surrounding background (trees, leaves, branches) remains fully intact
+       across the entire 1080p frame.
+
+    Parameters
+    ----------
+    background_1080p : np.ndarray
+        The full 1080p background canvas (bicubic-upscaled 360p, float32 or uint8).
+    roi_1080p : np.ndarray
+        The EDR/Real-ESRGAN-enhanced foreground patch at 3x scale, shape (H, W, 3),
+        uint8, matching the 3x-scaled bbox dimensions.
+    saliency_map : np.ndarray
+        Normalised float32 saliency map from YOLOv8-Segmentation, shape (360, 640),
+        values in [0.0, 1.0].
+    bbox : tuple of int
+        Bounding box (x, y, w, h) in 360p coordinate space.
+
+    Returns
+    -------
+    np.ndarray
+        The stitched 1080p output image (uint8).
     """
     x, y, w, h = bbox
 
-    # --- Step 1: Build full 1080p base canvas from background ---
-    # Ensure background_1080p is 1920x1080
+    # ---------------------------------------------------------------
+    # Step 1: Build full 1080p base canvas from background
+    # ---------------------------------------------------------------
     if background_1080p.shape != (1080, 1920, 3):
         canvas_1080p = cv2.resize(background_1080p, (1920, 1080), interpolation=cv2.INTER_CUBIC).astype(np.float32)
     else:
         canvas_1080p = background_1080p.astype(np.float32)
-    # --- End Step 1 ---
 
-    # --- Step 2: Place EDR-upscaled foreground ROI at 3x-scaled position ---
-    # Scale bbox coordinates from 360p to 1080p (factor of 3)
+    # ---------------------------------------------------------------
+    # Step 2: Place EDR/Real-ESRGAN-enhanced foreground ROI at 3x position
+    # ---------------------------------------------------------------
+    # Scale bbox from 360p to 1080p (factor of 3)
     target_x, target_y = x * 3, y * 3
 
     patch_h, patch_w = roi_1080p.shape[:2]
@@ -48,57 +65,60 @@ def alpha_blend_stitch(background_1080p, roi_1080p, saliency_map, bbox):
     if actual_w > 0 and actual_h > 0:
         # Resize ROI to exactly fit the target area
         if roi_1080p.shape[:2] != (actual_h, actual_w):
-            roi_1080p = cv2.resize(roi_1080p, (actual_w, actual_h), interpolation=cv2.INTER_LINEAR)
-        # Place the ROI on the canvas
-        canvas_1080p[target_y:end_y, target_x:end_x] = roi_1080p.astype(np.float32)
-    # --- End Step 2 ---
+            roi_1080p_resized = cv2.resize(roi_1080p, (actual_w, actual_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            roi_1080p_resized = roi_1080p
+        canvas_1080p[target_y:end_y, target_x:end_x] = roi_1080p_resized.astype(np.float32)
+    # ---------------------------------------------------------------
+    # Step 3: Extract the true YOLO segmentation mask, scale & feather
+    # ---------------------------------------------------------------
+    # The saliency_map is (360, 640) float32 [0,1], same as 360p frame resolution.
+    # Extract the region within the 360p bbox (clip to image bounds).
+    y1 = max(0, y)
+    y2 = min(360, y + h)
+    x1 = max(0, x)
+    x2 = min(640, x + w)
 
-    # --- Step 3: Build Gaussian feather mask covering the ROI region ---
-    # Create a feather mask that transitions from 1.0 (full ROI enhancement) at center
-    # to 0.0 (original background) at the edges of the ROI region.
-    # This ensures the bird is enhanced while the surrounding area blends naturally.
-    roi_region_height = end_y - target_y
-    roi_region_width = end_x - target_x
-    
-    # Create a feather mask that starts at 1.0 in center and fades to 0.0 at edges
-    # Use a circular mask that covers most of the ROI region
-    mask_canvas = np.zeros((roi_region_height, roi_region_width), dtype=np.float32)
-    
-    # Create an ellipse that covers most of the ROI
-    center_y, center_x = roi_region_height // 2, roi_region_width // 2
-    # Axes: cover 80% of width and height
-    axes_x = roi_region_width * 0.8 / 2
-    axes_y = roi_region_height * 0.8 / 2
-    
-    Y, X = np.ogrid[-center_y:roi_region_height-center_y, -center_x:roi_region_width-center_x]
-    ellipse_mask = (X/axes_x)**2 + (Y/axes_y)**2 <= 1
-    mask_canvas[ellipse_mask] = 1.0
-    
-    # Apply Gaussian blur to create smooth feather transition
-    # Sigma covers a significant portion of the ROI for smooth blending
-    feather_sigma = max(1, min(roi_region_width, roi_region_height) // 6)
-    feather_mask_2d = cv2.GaussianBlur(mask_canvas, (0, 0), feather_sigma)
-    feather_mask_2d = np.clip(feather_mask_2d, 0, 1)
-    
-    # Expand to 3 channels
-    feather_mask_3ch = np.repeat(feather_mask_2d[:, :, np.newaxis], 3, axis=2)
-    # --- End Step 3 ---
+    # Extract the saliency mask inside the bbox
+    if y2 > y1 and x2 > x1:
+        mask_roi = saliency_map[y1:y2, x1:x2]  # shape: (h_bb, w_bb), float32 [0,1]
+    else:
+        mask_roi = np.zeros((1, 1), dtype=np.float32)
 
-    # --- Step 4: Alpha blend ROI with original background using feather mask ---
-    # Create the output canvas (copy of canvas with ROI placed)
-    output = canvas_1080p.copy()
-    
-    # Blend the ROI with the original background patch using the feather mask
-    # The feather mask tapers from 1.0 at center to 0.0 at edges
-    # Blend formula: blended = feather_mask_3ch * roi_1080p_astype(float) + (1 - feather_mask_3ch) * orig_patch_astype(float)
-    blended_region = feather_mask_3ch * roi_1080p.astype(np.float32) + (1.0 - feather_mask_3ch) * orig_patch.astype(np.float32)
-    
+    # Scale this mask crop by 3x to match the exact dimensions of the
+    # EDR/Real-ESRGAN-enhanced ROI (which is 3x the original 360p ROI size).
+    mask_scaled = cv2.resize(mask_roi, (actual_w, actual_h), interpolation=cv2.INTER_LINEAR)
+
+    # Dilate the mask slightly to protect the subject's boundaries (head/beak)
+    # from being eaten away by the Gaussian blur.
+    mask_dilated = cv2.dilate(mask_scaled, np.ones((5, 5), np.uint8), iterations=2)
+
+    # Apply Gaussian blur for smooth edge feathering – ksize=(15,15) gives
+    # an ultra-smooth transition while the preceding dilation preserves edge.
+    mask_blurred = cv2.GaussianBlur(mask_dilated, (15, 15), 0)
+
+    # Clip to valid [0, 1] range
+    mask_blurred = np.clip(mask_blurred, 0, 1)
+
+    # Expand mask to 3 channels so it broadcasts over the RGB ROI
+    mask_3ch = np.repeat(mask_blurred[:, :, np.newaxis], 3, axis=2)
+
+    # ---------------------------------------------------------------
+    # Step 4: Exact pixel blending using the true YOLO mask
+    # ---------------------------------------------------------------
+    # The canvas already has the ROI placed (Step 2).  Blend the ROI with the
+    # original background patch using the feathered mask:
+    #       blended = mask_3ch * roi_region + (1 - mask_3ch) * orig_patch
+    blended_region = (mask_3ch * canvas_1080p[target_y:end_y, target_x:end_x].astype(np.float32) +
+                      (1.0 - mask_3ch) * orig_patch.astype(np.float32))
+
     # Place the blended region back onto the output canvas
+    output = canvas_1080p.copy()
     output[target_y:end_y, target_x:end_x] = blended_region
-    
+
     # Outside the ROI region, the output is pure original background (already in canvas)
     # No additional processing needed
-    # --- End Step 4 ---
+    # ---------------------------------------------------------------
 
     return output.astype(np.uint8)
 
@@ -121,7 +141,15 @@ def calculate_metrics(frame_gt, final_output, bbox):
         h_gt, w_gt = frame_gt.shape[:2]
         final_output = cv2.resize(final_output, (w_gt, h_gt), interpolation=cv2.INTER_LINEAR)
 
-    psnr_score = cv2.PSNR(frame_gt, final_output)
+    # cv2.PSNR expects images of the same type; convert to uint8 if needed
+    if frame_gt.dtype != final_output.dtype:
+        frame_gt_u8 = cv2.convertScaleAbs(frame_gt)
+        final_output_u8 = cv2.convertScaleAbs(final_output)
+    else:
+        frame_gt_u8 = frame_gt
+        final_output_u8 = final_output
+
+    psnr_score = cv2.PSNR(frame_gt_u8, final_output_u8)
     return psnr_score, compute_saved
 
 
@@ -135,10 +163,10 @@ def generate_comparison_grid(frame_360p, frame_gt, final_output, psnr, compute_s
 
     gray_gt = cv2.cvtColor(frame_gt, cv2.COLOR_BGR2GRAY)
     gray_out = cv2.cvtColor(final_output, cv2.COLOR_BGR2GRAY)
-    ssim_score = ssim(gray_gt, gray_out)
+    ssim_score = sssim(gray_gt, gray_out)
 
     gray_360 = cv2.cvtColor(frame_360_resized, cv2.COLOR_BGR2GRAY)
-    ssim_360 = ssim(gray_gt, gray_360)
+    ssim_360 = sssim(gray_gt, gray_360)
     psnr_360 = cv2.PSNR(frame_gt, frame_360_resized)
 
     labels = [

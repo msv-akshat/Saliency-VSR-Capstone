@@ -114,13 +114,21 @@ def upscale_foreground(roi_360p):
         output = torch.clamp(output, 0, 1).cpu()
         # CHW -> HWC, *255, uint8
         output_np = output.numpy()
-        output_hwc = np.transpose(output_np, (1, 2, 0))  # HWC
+        output_hwc = np.transpose(output_np, (1, 2, 0))  # HWC (RGB)
         output_uint8 = (output_hwc * 255.0).astype(np.uint8)
+
+        # RGB -> BGR (OpenCV expects BGR for output)
+        out_bgr = cv2.cvtColor(output_uint8, cv2.COLOR_RGB2BGR)
 
         # ---- 4x → 3x downscale -----------------------------------------
         enhanced_3x = cv2.resize(
-            output_uint8, (target_w, target_h), interpolation=cv2.INTER_AREA
+            out_bgr, (target_w, target_h), interpolation=cv2.INTER_AREA
         )
+
+        # Apply Unsharp Mask to recover micro-textures lost to GAN over-smoothing
+        blur = cv2.GaussianBlur(enhanced_3x, (0, 0), 2.0)
+        enhanced_3x = cv2.addWeighted(enhanced_3x, 1.5, blur, -0.5, 0)
+
         return enhanced_3x
 
     except Exception as e:
@@ -133,5 +141,5 @@ def upscale_foreground(roi_360p):
 
 
 def resize_background(frame_360p, target_shape=(1920, 1080)):
-    """Up-scale the full 360p frame to 1080p using bicubic interpolation."""
-    return cv2.resize(frame_360p, target_shape, interpolation=cv2.INTER_CUBIC)
+    """Up-scale the full 360p frame to 1080p using Lanczos4 interpolation."""
+    return cv2.resize(frame_360p, target_shape, interpolation=cv2.INTER_LANCZOS4)

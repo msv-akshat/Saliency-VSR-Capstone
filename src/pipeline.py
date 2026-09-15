@@ -2,7 +2,7 @@ import os
 import cv2
 
 def extract_and_degrade_video(video_path, output_dir, max_frames=50):
-    """Extracts frames from raw video, strictly downsamples to 360p with heavy degradation to test VSR."""
+    """Extracts frames from raw video, degrades to realistic 360p edge-device camera feed to test VSR."""
     gt_dir = os.path.join(output_dir, "ground_truth_1080p")
     degraded_dir = os.path.join(output_dir, "degraded_360p")
     
@@ -25,16 +25,14 @@ def extract_and_degrade_video(video_path, output_dir, max_frames=50):
         gt_path = os.path.join(gt_dir, f"frame_{count:04d}.png")
         cv2.imwrite(gt_path, frame)
         
-        # Aggressive degradation: multi-stage downsampling with extreme pixelation & loss
-        # Step 1: Heavy blur to destroy high frequencies (σ ≥ 3.0)
-        blurred = cv2.GaussianBlur(frame, (5, 5), 3.0)
-        # Step 2: Downscale to tiny size (160x90) using nearest-neighbor → massive blocky pixels
-        tiny = cv2.resize(blurred, (160, 90), interpolation=cv2.INTER_NEAREST)
-        # Step 3: Upscale back to 640x360 using nearest-neighbor → preserves blocky pixelation + aliasing
-        frame_360p = cv2.resize(tiny, (640, 360), interpolation=cv2.INTER_NEAREST)
+        # Realistic low-bandwidth edge device camera feed degradation:
+        # Step 1: Direct 360p downscale using bilinear interpolation
+        # (no artificial nearest-neighbor blocking)
+        frame_360p = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_LINEAR)
         
-        # Aggressive JPEG compression (quality ≤ 10) to add compression artifacts
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 10]
+        # Step 2: Heavy JPEG compression to simulate low bitrate / artifacts
+        # Quality 20 produces strong blocking + ringing but preserves natural gradients
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 20]
         result, enc_frame_360p = cv2.imencode('.jpg', frame_360p, encode_param)
         if result:
             frame_360p = cv2.imdecode(enc_frame_360p, cv2.IMREAD_COLOR)
@@ -50,7 +48,6 @@ def extract_and_degrade_video(video_path, output_dir, max_frames=50):
         cv2.imwrite(degraded_path, frame_360p)
         
         count += 1
-        
     cap.release()
-    print(f"Pipeline initialized: {count} frames processed with heavy degradation.")
+    print(f"Pipeline initialized: {count} frames processed with realistic degradation.")
     return gt_dir, degraded_dir

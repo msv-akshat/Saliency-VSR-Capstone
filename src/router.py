@@ -22,10 +22,17 @@ def compute_bounding_box(binary_mask):
     largest_contour = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(largest_contour)
 
-    # Strict clamping to image boundaries — no mock dimension defaults
-    x = max(0, min(x, w_img - 1))
-    y = max(0, min(y, h_img - 1))
-    w = max(1, min(w, w_img - x))  # enforce at least 1 pixel width
-    h = max(1, min(h, h_img - y))  # enforce at least 1 pixel height
+    # Add 15-pixel padding to all sides, clamped to frame boundaries
+    padding = 15
+    x_padded = max(0, x - padding)
+    y_padded = max(0, y - padding)
+    w_padded = min(w_img, x + w + padding) - x_padded
+    h_padded = min(h_img, y + h + padding) - y_padded
 
-    return x, y, w, h
+    # Strict clamping to image boundaries — no mock dimension defaults
+    x_padded = max(0, min(x_padded, w_img - 1))
+    y_padded = max(0, min(y_padded, h_img - 1))
+    w_padded = max(1, min(w_padded, w_img - x_padded))  # enforce at least 1 pixel width
+    h_padded = max(1, min(h_padded, h_img - y_padded))  # enforce at least 1 pixel height
+
+    return x_padded, y_padded, w_padded, h_padded
