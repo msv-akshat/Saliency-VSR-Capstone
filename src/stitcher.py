@@ -171,11 +171,11 @@ def generate_comparison_grid(frame_360p, frame_gt, final_output, psnr, compute_s
 
     labels = [
         f"360p (PSNR: {psnr_360:.1f}dB | SSIM: {ssim_360:.2f})",
-        f"Ground Truth 1080p",
-        f"Spatial VSR (PSNR: {psnr:.1f}dB | SSIM: {ssim_score:.2f})"
+        f"Spatial VSR (PSNR: {psnr:.1f}dB | SSIM: {ssim_score:.2f})",
+        f"Ground Truth 1080p"
     ]
 
-    panels = [frame_360_resized, frame_gt, final_output]
+    panels = [frame_360_resized, final_output, frame_gt]
     display_w = 640
     display_h = int(display_w * (h_gt / w_gt))
 

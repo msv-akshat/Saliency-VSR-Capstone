@@ -8,7 +8,10 @@ from src.processors import upscale_foreground, resize_background
 from src.stitcher import alpha_blend_stitch, calculate_metrics, generate_comparison_grid
 
 def run_pipeline():
-    video_path = "data/raw/bird_video.mp4"
+    # --- SELECT YOUR TEST VIDEO HERE ---
+    video_path = "data/raw/bird_video.mp4"       # Default Bird Video (Target Class: 14)
+    # video_path = "data/raw/dog_video.mp4"      # Close-up Dog Video (Target Class: 16)
+    # video_path = "data/raw/car_video.mp4"      # Wide-shot Car Video (Target Class: 2)
     output_dir = "data/processed"
     
     gt_dir, degraded_dir = extract_and_degrade_video(video_path, output_dir, max_frames=50)
